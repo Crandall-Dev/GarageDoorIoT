@@ -41,7 +41,7 @@ float distanceInch;
 
 float samples[10];
 #define SAMPLES_COUNT 10
-#define INF_DISTANCE_CM 2800
+#define INF_DISTANCE_CM 100
 
 enum DoorStatus {
   IS_CLOSED,
@@ -163,6 +163,8 @@ float getDistanceSample() {
   duration = pulseIn(echoPin, HIGH);  
   distanceCm = duration * SOUND_VELOCITY/2;
   distanceInch = distanceCm * CM_TO_INCH;
+
+  //Serial.println(distanceCm);
 
   return distanceCm;
 }
