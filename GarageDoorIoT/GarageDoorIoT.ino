@@ -15,15 +15,17 @@
 #include <PubSubClient.h>
 
 // WiFi
-//const char *ssid = "netssid"; // Enter your WiFi name
-//const char *password = "passwd";  // Enter WiFi password
+// Values set by 3rd party tool as to not check them into the git repo here
+//const char *ssid = "netssid";
+//const char *password = "passwd";
 
 // MQTT Broker
 const char *mqtt_broker = "10.0.0.4";
-const char *topic = "test/topic";
+const char *topic = "IoT/rawevents";
 //const char *mqtt_username = "emqx";
 //const char *mqtt_password = "public";
 const int mqtt_port = 1883;
+#define MQTT_HOSTNAME "broker.local"
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -51,50 +53,69 @@ enum DoorStatus {
 unsigned int last_report_epoch;
 #define REPORT_TIMEOUT_MS 500
 
+char * g_location = "spaceport";
+char * g_sensorType = "garagedoor";
+char g_id[13] = "";
+
+bool g_led_status = false;
 
 // ** ************************************************************
-void setup() {
-  // Set software serial baud to 115200;
-  Serial.begin(115200);
+// Onboard LED API / Controls
+void ledON() {
+  g_led_status = true;
+  digitalWrite(LED_BUILTIN, LOW); // 8266's are backwards
+}
 
-  pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output
-  pinMode(echoPin, INPUT); // Sets the echoPin as an Input
-  
-  // connecting to a WiFi network
-  //WiFi.begin(ssid, password);
-  WiFi.begin();
-  while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
-      Serial.println("Connecting to WiFi..");
+void ledOFF() {
+  g_led_status = false;
+  digitalWrite(LED_BUILTIN, HIGH); // 8266's are backwards
+}
+
+void ledToggle() {
+  if(g_led_status) {
+    ledOFF();
+  } else {
+    ledON();
   }
-  Serial.println("Connected to the WiFi network");
-
-  //connecting to a mqtt broker
-  client.setServer(mqtt_broker, mqtt_port);
-  client.setCallback(callback);
-  while (!client.connected()) {
-      String client_id = "esp8266-client-";
-      client_id += String(WiFi.macAddress());
-      Serial.printf("The client %s connects to the public mqtt broker\n", client_id.c_str());
-      //if (client.connect(client_id.c_str(), mqtt_username, mqtt_password)) {
-      if (client.connect(client_id.c_str())) {
-          Serial.println("MQTT broker connected");
-      } else {
-          Serial.print("failed with state ");
-          Serial.print(client.state());
-          delay(2000);
-      }
-  }
-  // publish and subscribe
-  client.publish(topic, "hello emqx try 2 first worked");
-  client.subscribe(topic);
-
-  last_report_epoch = millis();
 }
 
 
 // ** ************************************************************
-void callback(char *topic, byte *payload, unsigned int length) {
+void setupMQTTConnection() {
+  //connecting to a mqtt broker
+  Serial.println("Connecting to MQTT Broker");
+  
+  client.setServer(mqtt_broker, mqtt_port);
+  client.setCallback(mqtt_queue_callback);
+  while (!client.connected()) {
+    String client_id = "esp8266-client-";
+    client_id += String(WiFi.macAddress());
+    Serial.printf("The client %s connects to the public mqtt broker\n", client_id.c_str());
+    if (client.connect(client_id.c_str())) {
+        Serial.println("MQTT broker connected");
+    } else {
+        Serial.print("failed with state ");
+        Serial.print(client.state());
+        delay(2000);
+    }
+  }
+
+  // client.subscribe(topic);
+}
+
+
+// ** ************************************************************
+void setupDeviceID() {
+  byte mac[6];
+  WiFi.macAddress(mac);
+  sprintf(g_id, "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  Serial.printf("Device uniqe id: %s\n", g_id);
+  
+}
+
+
+// ** ************************************************************
+void mqtt_queue_callback(char *topic, byte *payload, unsigned int length) {
   Serial.print("Message arrived in topic: ");
   Serial.println(topic);
   Serial.print("Message:");
@@ -107,28 +128,41 @@ void callback(char *topic, byte *payload, unsigned int length) {
 
 
 // ** ************************************************************
-void loop() {
-  client.loop();
+void handleNetworkStatus() {
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.disconnect();
+    WiFi.begin();
 
-  if(last_report_epoch + REPORT_TIMEOUT_MS < millis()) {
-    runReport();
+    Serial.print("Connecting to WiFi...");
+    while (WiFi.status() != WL_CONNECTED) {
+      ledToggle();
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println("Connected to the WiFi network");
+
+    setupMQTTConnection();
+    ledOFF();
   }
-  
 }
 
 
 // ** ************************************************************
 void runReport() {
-  char message[30];
+  char message[50];
+  char value[10];
 
   if(isDoorOpen() == IS_OPEN) {
-    strcpy(message, "DOOR OPEN");
+    strcpy(value, "OPEN");
+    ledON();
   } else if(isDoorOpen() == IS_CLOSED) {
-    strcpy(message, "DOOR CLOSED");
+    strcpy(value, "CLOSED");
+    ledOFF();
   } else {
-    strcpy(message, "UNKNOWN STATUS");
+    strcpy(value, "UNKNOWN");
   }
 
+  sprintf(message, "%s:%s:%s:%s", g_id, g_location, g_sensorType, value);
   client.publish(topic, message);
 }
 
@@ -175,5 +209,40 @@ void takeSamples() {
   for(int i = 0; i < SAMPLES_COUNT; i++) {
     samples[i] = getDistanceSample();
     delay(10);
+  }
+}
+
+
+// ** ************************************************************
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  for( int i = 0; i < 4; i++ ) {
+    ledToggle();
+    delay(1000);
+  }
+
+  setupDeviceID();
+
+  handleNetworkStatus();
+
+  last_report_epoch = millis();
+
+  Serial.println("Beginning normal operations after Wifi Connect");
+}
+
+
+// ** ************************************************************
+void loop() {
+  handleNetworkStatus();  // Check for disconnection & handle it
+  
+  client.loop();    // Process/check MQTT queues
+
+  if(last_report_epoch + REPORT_TIMEOUT_MS < millis()) {
+    runReport();
   }
 }
